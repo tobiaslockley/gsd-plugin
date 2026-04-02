@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01-PLAN.md -- Add context: fork to 15 orchestrator GSD commands
 - [x] 01-02-PLAN.md -- Audit and enhance all 18 agent definition frontmatter
-- [ ] 01-03-PLAN.md -- Reduce CLAUDE.md to minimal + update generate-claude-md tool
+- [x] 01-03-PLAN.md -- Reduce CLAUDE.md to minimal + update generate-claude-md tool
 
 ### Phase 2: MCP Server
 **Goal**: GSD project state and workflow operations are accessible via structured MCP tools, replacing BashTool-to-gsd-tools roundtrips and prompt-injected orchestration context
