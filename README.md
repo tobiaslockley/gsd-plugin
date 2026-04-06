@@ -16,13 +16,7 @@ claude plugin marketplace add jnuyens/gsd-plugin
 claude plugin install gsd@gsd-plugin
 ```
 
-That's it. This installs everything: slash commands, agent definitions, hooks, and an MCP server for project state. No manual configuration required.
-
-To update later:
-
-```bash
-claude plugin marketplace update gsd-plugin
-```
+That's it. This installs everything: slash commands, agent definitions, hooks, and an MCP server for project state. No manual configuration required. Enable auto-update for the marketplace in Claude Code settings to receive updates automatically.
 
 ## What GSD Plugin provides
 
@@ -105,7 +99,7 @@ claude plugin uninstall gsd
 
 ## Updating
 
-Updates are managed automatically by Claude Code's plugin system:
+Enable auto-update for the marketplace in Claude Code settings and updates will be applied automatically at startup. For manual updates:
 
 ```bash
 claude plugin marketplace update gsd-plugin
