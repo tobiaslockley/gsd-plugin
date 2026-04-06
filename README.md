@@ -9,10 +9,20 @@ This project repackages the GSD workflow system as a native Claude Code plugin w
 ## Installation
 
 ```bash
-claude plugin install gsd
+# Step 1: Add the marketplace
+claude plugin marketplace add jnuyens/gsd-plugin
+
+# Step 2: Install the plugin
+claude plugin install gsd@gsd-plugin
 ```
 
-That single command installs everything: slash commands, agent definitions, hooks, and an MCP server for project state. No manual configuration required.
+That's it. This installs everything: slash commands, agent definitions, hooks, and an MCP server for project state. No manual configuration required.
+
+To update later:
+
+```bash
+claude plugin marketplace update gsd-plugin
+```
 
 ## What GSD Plugin provides
 
@@ -27,7 +37,7 @@ That single command installs everything: slash commands, agent definitions, hook
 
 | Aspect | Upstream GSD | This plugin |
 |--------|-------------|-------------|
-| Install | `npx get-shit-done-cc` | `claude plugin install gsd` |
+| Install | `npx get-shit-done-cc` | `claude plugin marketplace add jnuyens/gsd-plugin && claude plugin install gsd@gsd-plugin` |
 | Context overhead | ~3,000-5,000 tokens/turn via CLAUDE.md | ~200 tokens (92% reduction) |
 | Skill isolation | Inline execution | `context: fork` sub-agent isolation |
 | State access | BashTool roundtrips to gsd-tools | MCP resources + tools |
@@ -36,7 +46,7 @@ That single command installs everything: slash commands, agent definitions, hook
 
 ## Quick start
 
-1. Install: `claude plugin install gsd`
+1. Install: `claude plugin marketplace add jnuyens/gsd-plugin && claude plugin install gsd@gsd-plugin`
 2. Start a new project: `/gsd:new-project`
 3. Plan your first phase: `/gsd:plan-phase`
 4. Execute: `/gsd:execute-phase`
@@ -87,7 +97,8 @@ For full isolation:
 ```bash
 # Use a devcontainer or Docker with Claude Code installed
 # Install the plugin fresh -- zero risk to host system
-claude plugin install gsd
+claude plugin marketplace add jnuyens/gsd-plugin
+claude plugin install gsd@gsd-plugin
 ```
 
 ### What to verify
@@ -115,7 +126,7 @@ claude plugin uninstall gsd
 Updates are managed automatically by Claude Code's plugin system:
 
 ```bash
-claude plugin install gsd
+claude plugin marketplace update gsd-plugin
 ```
 
 ## Migrating from legacy install
@@ -127,7 +138,7 @@ If you previously installed GSD via `get-shit-done-cc` or manual setup, follow t
 | Legacy component | Plugin replacement |
 |---|---|
 | `~/.claude/get-shit-done/` directory | Plugin cache at `~/.claude/plugins/cache/` (managed automatically) |
-| `get-shit-done-cc` npm package | `claude plugin install gsd` |
+| `get-shit-done-cc` npm package | `claude plugin install gsd@gsd-plugin` |
 | `/gsd:update` command | Plugin-managed updates (command is now deprecated) |
 | Manual `.mcp.json` entries pointing at `~/.claude/get-shit-done/mcp/server.cjs` | Plugin manifest declares MCP server automatically |
 | Manual `~/.claude/settings.json` hook entries | Plugin-packaged `hooks/hooks.json` auto-loaded by plugin loader |
@@ -137,7 +148,8 @@ If you previously installed GSD via `get-shit-done-cc` or manual setup, follow t
 #### 1. Install the plugin
 
 ```bash
-claude plugin install gsd
+claude plugin marketplace add jnuyens/gsd-plugin
+claude plugin install gsd@gsd-plugin
 ```
 
 #### 2. Remove legacy `~/.claude/get-shit-done/` directory
@@ -186,7 +198,7 @@ npm uninstall -g get-shit-done-cc
 
 #### 7. Stop using `/gsd:update`
 
-The `/gsd:update` command is deprecated. Use `claude plugin install gsd` to update.
+The `/gsd:update` command is deprecated. Use `claude plugin marketplace update gsd-plugin` to update.
 
 ### Automated migration audit
 
