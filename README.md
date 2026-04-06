@@ -69,7 +69,7 @@ mkdir ~/test-gsd-plugin && cd ~/test-gsd-plugin
 git init
 
 # 3. Launch Claude Code with the plugin root override
-CLAUDE_PLUGIN_ROOT=~/src/gsd-plugin claude
+CLAUDE_PLUGIN_ROOT=~/src/gsd-plugin claude --dangerously-skip-permissions
 
 # 4. Inside the session, GSD commands use the plugin version
 #    Your ~/.claude/get-shit-done/ is untouched
