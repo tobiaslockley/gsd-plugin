@@ -1,24 +1,39 @@
 {
-  "description": "GSD workflow hooks -- packaged plugin hooks replacing legacy ~/.claude/settings.json entries",
+  "description": "GSD workflow hooks -- session context loading, workflow enforcement, and tool-use monitoring",
   "hooks": {
     "SessionStart": [
       {
-        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook session-start",
-        "timeout": 5000
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook session-start",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write",
-        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook pre-tool-use",
-        "timeout": 3000
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook pre-tool-use",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Bash",
-        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook post-tool-use",
-        "timeout": 3000
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook post-tool-use",
+            "timeout": 3000
+          }
+        ]
       }
     ]
   }
