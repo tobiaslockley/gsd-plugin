@@ -28,6 +28,10 @@ Reduce GSD's per-turn token overhead and agent spawn latency without breaking mu
 
 ### Active
 
+- [ ] PreCompact hook saves HANDOFF.json checkpoint when tokens run low
+- [ ] SessionStart hook detects HANDOFF.json and triggers auto-resume
+- [ ] CLAUDE.md auto-resume instruction as backup trigger
+- [ ] Clean checkpoint lifecycle (create → resume → cleanup)
 - [ ] Add `allowed-tools` to verification skills for read-only enforcement
 - [ ] Tool restriction profiles (implementation vs verification vs research)
 - [ ] Empirical token measurement before/after (analytical estimates validated during v1.0)
@@ -40,6 +44,16 @@ Reduce GSD's per-turn token overhead and agent spawn latency without breaking mu
 - Coordinator mode integration — feature-gated, wait for public API
 - WorkflowTool registration — feature-gated, wait for public API
 - Offline mode — real-time context is core value
+
+## Current Milestone: v1.1 Session Continuity
+
+**Goal:** Seamless GSD session continuity across context resets using Claude Code's native hook events.
+
+**Target features:**
+- PreCompact hook saves HANDOFF.json checkpoint when tokens run low
+- SessionStart hook detects HANDOFF.json and triggers auto-resume
+- CLAUDE.md instruction as backup for auto-resume
+- Clean checkpoint lifecycle (create → resume → cleanup)
 
 ## Context
 
@@ -88,4 +102,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-06 after v1.0 milestone*
+*Last updated: 2026-04-11 after v1.1 milestone start*
