@@ -105,18 +105,28 @@ function extractBullets(sectionText) {
 /**
  * Parse `git status --porcelain` output into an array of file entries.
  * Each entry is an object: { status: "M", path: "file.txt" }
+ *
+ * Porcelain v1 format per line is: "XY␣path" where X is the index status, Y
+ * is the worktree status, then a single space, then the path. Either X or Y
+ * may be a literal space (unmodified-in-that-column), e.g. " M foo" means
+ * modified-in-worktree-only.
+ *
+ * Note: execGit() in core.cjs calls .trim() on the stdout string, which
+ * strips the leading space from the FIRST line only. We handle that by
+ * using a forgiving regex rather than fixed-column slicing.
  */
 function parsePorcelain(stdout) {
   if (!stdout) return [];
   return stdout
     .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean)
+    .map(line => line.replace(/\r$/, ''))
+    .filter(line => line.length > 0)
     .map(line => {
-      // Porcelain format: "XY path" where XY are two status chars
-      const match = line.match(/^(..)\s+(.+)$/);
+      // Handle both " M path" and "M  path" (leading-space-trimmed first line).
+      // Regex: optional leading space, 1-2 non-space status chars, 1+ spaces, path.
+      const match = line.match(/^\s?(\S{1,2})\s+(.+)$/);
       if (!match) return { status: '??', path: line };
-      return { status: match[1].trim() || '??', path: match[2] };
+      return { status: match[1], path: match[2] };
     });
 }
 

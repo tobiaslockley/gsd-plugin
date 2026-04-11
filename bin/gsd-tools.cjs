@@ -137,6 +137,10 @@
  *
  * Documentation:
  *   docs-init                            Project context for docs-update workflow
+ *
+ * Checkpoint:
+ *   checkpoint [--source S]              Save HANDOFF.json checkpoint
+ *     [--context-notes "..."]            --source auto-compact|manual-pause
  */
 
 const fs = require('fs');
@@ -951,6 +955,14 @@ async function runCommand(command, args, cwd, raw) {
       const phaseArg = args[0];
       if (!phaseArg) { error('Usage: write-phase-memory <phase-number>'); }
       memory.writePhaseMemory(cwd, phaseArg, raw);
+      break;
+    }
+
+    // ─── Checkpoint ────────────────────────────────────────────────────
+
+    case 'checkpoint': {
+      const checkpoint = require('./lib/checkpoint.cjs');
+      checkpoint.cmdCheckpoint(cwd, args, raw);
       break;
     }
 
