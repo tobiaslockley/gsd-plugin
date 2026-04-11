@@ -80,46 +80,45 @@ Report any summaries with placeholder content as incomplete items.
 </step>
 
 <step name="write_structured">
-**Write structured handoff to `.planning/HANDOFF.json`:**
+**Write structured handoff to `.planning/HANDOFF.json` using the shared checkpoint command:**
+
+The shared `checkpoint` command in `gsd-tools.cjs` generates the base HANDOFF.json with state gathered from STATE.md, the current phase directory, and live git output (status + recent log). This is the same function the PreCompact hook uses, so manual pause and auto-compact checkpoints always produce the identical 19-field schema (D-01, D-10, D-12).
+
+Step 1 -- generate the base HANDOFF.json:
 
 ```bash
-timestamp=$(node "$GSD_TOOLS" current-timestamp full --raw)
+node "$GSD_TOOLS" checkpoint --source manual-pause
 ```
 
-```json
-{
-  "version": "1.0",
-  "timestamp": "{timestamp}",
-  "phase": "{phase_number}",
-  "phase_name": "{phase_name}",
-  "phase_dir": "{phase_dir}",
-  "plan": {current_plan_number},
-  "task": {current_task_number},
-  "total_tasks": {total_task_count},
-  "status": "paused",
-  "completed_tasks": [
-    {"id": 1, "name": "{task_name}", "status": "done", "commit": "{short_hash}"},
-    {"id": 2, "name": "{task_name}", "status": "done", "commit": "{short_hash}"},
-    {"id": 3, "name": "{task_name}", "status": "in_progress", "progress": "{what_done}"}
-  ],
-  "remaining_tasks": [
-    {"id": 4, "name": "{task_name}", "status": "not_started"},
-    {"id": 5, "name": "{task_name}", "status": "not_started"}
-  ],
-  "blockers": [
-    {"description": "{blocker}", "type": "technical|human_action|external", "workaround": "{if any}"}
-  ],
-  "human_actions_pending": [
-    {"action": "{what needs to be done}", "context": "{why}", "blocking": true}
-  ],
-  "decisions": [
-    {"decision": "{what}", "rationale": "{why}", "phase": "{phase_number}"}
-  ],
-  "uncommitted_files": [],
-  "next_action": "{specific first action when resuming}",
-  "context_notes": "{mental state, approach, what you were thinking}"
-}
+This writes `.planning/HANDOFF.json` with `source: "manual-pause"`, `status: "paused"`, `version: "1.0"`, and auto-populates:
+- `phase`, `phase_name`, `phase_dir` from STATE.md frontmatter
+- `plan`, `task`, `total_tasks` from STATE.md "Current Position"
+- `completed_tasks` / `remaining_tasks` from the PLAN.md / SUMMARY.md pairs in the phase directory + recent git log
+- `uncommitted_files` from a fresh `git status --porcelain` (D-03 -- always live)
+- `decisions` from STATE.md "Accumulated Context > Decisions"
+- `context_notes` from STATE.md body + recent commits
+- `next_action` from STATE.md "Current Position > Status"
+
+Step 2 -- enrich with conversation-only context. The checkpoint command cannot see the active conversation, so the skill merges in fields that only the pausing agent knows about (from the `gather` step):
+
+```bash
+# Read the generated base
+cat .planning/HANDOFF.json
 ```
+
+Using the Read + Write tools, update these fields in-place with data from the gather step:
+
+- `completed_tasks`: Replace or augment with the per-task list you collected in `gather` (include commit short hashes and in-progress notes from the current session, not just what STATE.md knew).
+- `remaining_tasks`: Replace with the specific remaining tasks you identified, including any new ones discovered this session.
+- `blockers`: Append entries the conversation uncovered. Each entry follows `{"description": "...", "type": "technical|human_action|external", "workaround": "..."}`.
+- `human_actions_pending`: Append entries for manual steps the resuming agent must perform before continuing. Each entry follows `{"action": "...", "context": "...", "blocking": true|false}`.
+- `decisions`: Append session-scoped decisions (rationale + phase). These are on top of anything the checkpoint command already parsed from STATE.md.
+- `context_notes`: Append your mental-state and approach notes to the auto-generated context string. Do not overwrite -- preserve the STATE.md-derived context.
+- `next_action`: Override with the specific first action you want the resuming agent to take (from gather step). Fall back to the checkpoint-generated value if there's nothing session-specific to say.
+
+Leave every other field untouched: `version`, `timestamp`, `source`, `partial`, `phase*`, `plan`, `task`, `total_tasks`, `status`, and `uncommitted_files` are all produced correctly by the shared function and must not be hand-edited.
+
+After merging, write the updated HANDOFF.json back to `.planning/HANDOFF.json`. The final object keeps the exact 19-field schema that `/gsd-resume-work` expects (per D-11, resume treats manual-pause and auto-compact HANDOFF files identically).
 </step>
 
 <step name="write">
