@@ -35,6 +35,17 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/gsd-tools.cjs\" hook pre-compact",
+            "timeout": 5000
+          }
+        ]
+      }
     ]
   }
 }

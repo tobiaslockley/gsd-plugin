@@ -969,7 +969,12 @@ async function runCommand(command, args, cwd, raw) {
     // ─── Hooks ─────────────────────────────────────────────────────────
 
     case 'hook': {
-      const hookType = args[0]; // session-start, pre-tool-use, post-tool-use
+      // args[0] is the command itself ('hook'); args[1] is the hook subtype.
+      // Historical note: this previously read args[0], which silently matched
+      // 'hook' and made the session-start migration a dead branch. Fixing the
+      // index here re-enables session-start migration and is required for the
+      // pre-compact handler below to run at all. [Rule 1 - Bug]
+      const hookType = args[1]; // session-start, pre-tool-use, post-tool-use, pre-compact
       if (hookType === 'session-start') {
         // Auto-migrate legacy artifacts on first session
         try {
@@ -984,6 +989,37 @@ async function runCommand(command, args, cwd, raw) {
             }
           }
         } catch { /* never break session start */ }
+      } else if (hookType === 'pre-compact') {
+        // PreCompact: save checkpoint before context compaction.
+        // CRITICAL: stdout must stay EMPTY -- PreCompact stdout becomes
+        // newCustomInstructions injected into the compaction prompt
+        // (executeHooksOutsideREPL in Claude Code). Use stderr only for
+        // user-visible messages.
+        //
+        // Per D-04: best effort within 5s timeout, never crash the hook.
+        // Per D-05: writeCheckpoint always overwrites HANDOFF.json.
+        // The `source` is always "auto-compact" regardless of trigger
+        // (manual /compact vs auto) -- "manual-pause" is reserved for
+        // the /gsd-pause-work skill only.
+        try {
+          const checkpoint = require('./lib/checkpoint.cjs');
+
+          // Read stdin for hook input (contains trigger + session info).
+          // Best effort: stdin may not be a file in some test harnesses.
+          try {
+            fs.readFileSync(0, 'utf-8');
+          } catch { /* stdin may not be available */ }
+
+          checkpoint.writeCheckpoint(cwd, {
+            source: 'auto-compact',
+            partial: false
+          });
+
+          process.stderr.write('GSD: checkpoint saved to .planning/HANDOFF.json\n');
+        } catch (err) {
+          // Best effort per D-04 -- never crash the hook
+          process.stderr.write('GSD: checkpoint save failed: ' + (err && err.message ? err.message : 'unknown error') + '\n');
+        }
       }
       // pre-tool-use and post-tool-use: no-op for now
       break;
