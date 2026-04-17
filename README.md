@@ -47,56 +47,16 @@ That's it. This installs everything: slash commands, agent definitions, hooks, a
 4. Execute: `/gsd:execute-phase`
 5. Verify: `/gsd:verify-work`
 
-## Testing without affecting your current GSD install
+## Developing this fork
 
-If you already have GSD installed (via `npx get-shit-done-cc` or `~/.claude/get-shit-done/`), you can test this plugin version safely in an isolated environment.
-
-Test the plugin from a fresh project directory without touching your existing install:
+This fork is loaded directly from source via `--plugin-dir`, not from the marketplace.
 
 ```bash
-# 1. Clone this repo somewhere
-git clone https://github.com/jnuyens/gsd-plugin.git ~/src/gsd-plugin
-
-# 2. Move the legacy install out of the way (prevents duplicate commands)
-mv ~/.claude/get-shit-done ~/.claude/get-shit-done-legacy
-
-# 3. Create a throwaway test project
-mkdir ~/test-gsd-plugin && cd ~/test-gsd-plugin
-git init
-
-# 4. Launch Claude Code with the plugin root override
-CLAUDE_PLUGIN_ROOT=~/src/gsd-plugin claude --dangerously-skip-permissions
-
-# 5. Inside the session, only plugin GSD commands are active
+# From any project directory:
+claude --plugin-dir ~/src/gsd-plugin/
 ```
 
-To restore your legacy install after testing:
-
-```bash
-mv ~/.claude/get-shit-done-legacy ~/.claude/get-shit-done
-```
-
-The `CLAUDE_PLUGIN_ROOT` env var tells the plugin's `bin/lib/core.cjs` to resolve all paths from the specified directory instead of the default plugin cache.
-
-### What to verify
-
-After launching with the plugin:
-
-1. `/gsd:help` -- lists all 60 commands
-2. `/gsd:progress` -- shows project state (or prompts to create one)
-3. `/gsd:new-project` -- full project initialization flow
-4. Check MCP resources are available (the GSD MCP server should auto-start via plugin manifest)
-
-### Rolling back
-
-To revert to upstream GSD after testing:
-
-```bash
-# Remove the plugin
-claude plugin uninstall gsd
-
-# Your legacy ~/.claude/get-shit-done/ is still in place and working
-```
+No install step, no cache, no automatic migration. Edits to the fork are live on next session.
 
 ## Updating
 
@@ -112,70 +72,21 @@ claude plugin install gsd@gsd-plugin
 
 Note: Step 1 refreshes the marketplace index but does not upgrade the installed plugin. Step 2 is needed to install the new version.
 
-## Migrating from legacy install
+## Auditing a legacy GSD install
 
-If you previously installed GSD via `get-shit-done-cc` or manual setup, most migration happens automatically.
-
-### What happens automatically
-
-On your first session after installing the plugin, GSD auto-migrates:
-
-- **Moves** `~/.claude/get-shit-done/` to `~/.claude/get-shit-done-legacy/` (safe backup, not deleted)
-- **Moves** `~/.claude/commands/gsd/` to `~/.claude/commands/gsd-legacy/` (prevents duplicate slash commands)
-- **Removes** legacy GSD skill directories (`gsd-*`) from `~/.claude/skills/`
-- **Removes** legacy GSD agent files (`gsd-*.md`) from `~/.claude/agents/`
-- **Removes** legacy GSD MCP server entries from your project's `.mcp.json`
-- **Removes** legacy GSD hook entries from `~/.claude/settings.json`
-- **Removes** legacy hook scripts (`gsd-check-update.js`, `gsd-context-monitor.js`, `gsd-prompt-guard.js`, `gsd-statusline.js`) from `~/.claude/hooks/`
-
-You'll see a summary of what was migrated in the session output.
-
-### What you still need to do manually
-
-#### 1. Install the plugin
-
-```bash
-claude plugin marketplace add jnuyens/gsd-plugin
-claude plugin install gsd@gsd-plugin
-```
-
-#### 2. Uninstall `get-shit-done-cc` npm package (if installed)
-
-```bash
-npm uninstall -g get-shit-done-cc
-```
-
-#### 3. Stop using `/gsd:update`
-
-The `/gsd:update` command is deprecated. Use `claude plugin marketplace update gsd-plugin` to update.
-
-#### 4. Clean up the backup (optional, after verifying the plugin works)
-
-```bash
-rm -rf ~/.claude/get-shit-done-legacy/
-```
-
-### Manual migration audit
-
-To check for any remaining legacy artifacts:
+The plugin never mutates user-owned config. If you previously installed GSD via `get-shit-done-cc` or a manual setup, run the audit command to list any leftover artifacts:
 
 ```bash
 node bin/gsd-tools.cjs migrate
 ```
 
-This prints all legacy GSD artifacts found on your system. To remove them (with confirmation):
+The audit reports legacy paths in `~/.claude/get-shit-done/`, `~/.claude/commands/gsd/`, skill/agent/hook files under `~/.claude/`, GSD entries in project `.mcp.json`, GSD hook entries in `~/.claude/settings.json`, and the retired `get-shit-done-cc` npm package.
+
+Running with `--clean` moves the two plugin-owned directories (`~/.claude/get-shit-done/` and `~/.claude/commands/gsd/`) to `-legacy` backups and prints a manual-removal checklist for everything else — you decide whether to remove user-curated config such as `settings.json`, agent files, or skill dirs.
 
 ```bash
 node bin/gsd-tools.cjs migrate --clean
 ```
-
-### Verifying migration
-
-After migration, verify the plugin is active:
-
-1. Start a new Claude Code session
-2. Run `/gsd:help` -- should list all commands
-3. Check that MCP resources are available (the GSD MCP server should auto-start)
 
 ## Credits
 
