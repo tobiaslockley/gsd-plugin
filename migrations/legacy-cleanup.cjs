@@ -306,77 +306,6 @@ async function cleanLegacyRoot() {
   return true;
 }
 
-async function cleanMcpEntries(cwd) {
-  const projectMcp = path.join(cwd, '.mcp.json');
-  if (!fs.existsSync(projectMcp)) return false;
-
-  try {
-    const content = JSON.parse(fs.readFileSync(projectMcp, 'utf8'));
-    const servers = content.mcpServers || {};
-    let changed = false;
-
-    for (const [name, config] of Object.entries(servers)) {
-      const args = (config.args || []).join(' ');
-      const cmd = config.command || '';
-      if (`${cmd} ${args}`.includes('get-shit-done')) {
-        console.log(`  Removing MCP server entry: "${name}" from ${projectMcp}`);
-        delete servers[name];
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      content.mcpServers = servers;
-      fs.writeFileSync(projectMcp, JSON.stringify(content, null, 2) + '\n');
-      console.log('  Updated .mcp.json');
-    }
-    return changed;
-  } catch {
-    return false;
-  }
-}
-
-async function cleanSettingsHooks() {
-  if (!fs.existsSync(LEGACY_PATHS.settingsJson)) return false;
-
-  try {
-    const content = JSON.parse(fs.readFileSync(LEGACY_PATHS.settingsJson, 'utf8'));
-    const hooks = content.hooks || {};
-    let changed = false;
-
-    for (const [event, groups] of Object.entries(hooks)) {
-      if (!Array.isArray(groups)) continue;
-      const filtered = groups.filter((group) => {
-        const cmds = extractHookCommands(group);
-        const hasLegacy = cmds.some(isLegacyGsdHookCommand);
-        if (hasLegacy) {
-          for (const cmd of cmds) {
-            if (isLegacyGsdHookCommand(cmd)) {
-              console.log(`  Removing hook: "${event}" -> ${cmd}`);
-            }
-          }
-          changed = true;
-          return false;
-        }
-        return true;
-      });
-      hooks[event] = filtered;
-      if (filtered.length === 0) {
-        delete hooks[event];
-      }
-    }
-
-    if (changed) {
-      content.hooks = hooks;
-      fs.writeFileSync(LEGACY_PATHS.settingsJson, JSON.stringify(content, null, 2) + '\n');
-      console.log('  Updated settings.json');
-    }
-    return changed;
-  } catch {
-    return false;
-  }
-}
-
 async function cleanGsdCommands() {
   if (!fs.existsSync(LEGACY_PATHS.gsdCommands)) return false;
   const backupPath = LEGACY_PATHS.gsdCommands + '-legacy';
@@ -390,47 +319,10 @@ async function cleanGsdCommands() {
   return true;
 }
 
-async function cleanGsdSkills() {
-  if (!fs.existsSync(LEGACY_PATHS.gsdSkills)) return false;
-  let cleaned = false;
-  try {
-    const dirs = fs.readdirSync(LEGACY_PATHS.gsdSkills).filter(d => d.startsWith('gsd-'));
-    for (const dir of dirs) {
-      const fullPath = path.join(LEGACY_PATHS.gsdSkills, dir);
-      console.log(`  Removing: ${fullPath}`);
-      fs.rmSync(fullPath, { recursive: true, force: true });
-      cleaned = true;
-    }
-  } catch { /* skip */ }
-  return cleaned;
-}
-
-async function cleanGsdAgents() {
-  if (!fs.existsSync(LEGACY_PATHS.agentsDir)) return false;
-  let cleaned = false;
-  try {
-    const files = fs.readdirSync(LEGACY_PATHS.agentsDir).filter(f => f.startsWith('gsd-'));
-    for (const file of files) {
-      const fullPath = path.join(LEGACY_PATHS.agentsDir, file);
-      console.log(`  Removing: ${fullPath}`);
-      fs.unlinkSync(fullPath);
-      cleaned = true;
-    }
-  } catch { /* skip */ }
-  return cleaned;
-}
-
-async function cleanHookFiles() {
-  let cleaned = false;
-  for (const hookFile of LEGACY_PATHS.hookFiles) {
-    const fullPath = path.join(LEGACY_PATHS.hooksDir, hookFile);
-    if (fs.existsSync(fullPath)) {
-      console.log(`  Removing: ${fullPath}`);
-      fs.unlinkSync(fullPath);
-      cleaned = true;
-    }
-  }
-  return cleaned;
+function printManualRemovalChecklist(findings, label, formatter) {
+  if (findings.length === 0) return;
+  console.log(`\nManual removal required for ${label}:`);
+  for (const f of findings) console.log(`  - ${formatter(f)}`);
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -500,13 +392,37 @@ async function main() {
   console.log('Cleaning up...');
   console.log('');
 
+  // Plugin-owned artifacts: safe to move to backup.
   await cleanLegacyRoot();
   await cleanGsdCommands();
-  await cleanGsdSkills();
-  await cleanGsdAgents();
-  await cleanMcpEntries(cwd);
-  await cleanSettingsHooks();
-  await cleanHookFiles();
+
+  // User-curated config: the plugin never mutates these. Print a checklist
+  // so the user can remove them manually.
+  printManualRemovalChecklist(
+    skillAudit,
+    '~/.claude/skills/ (remove gsd-* dirs)',
+    (f) => f.details,
+  );
+  printManualRemovalChecklist(
+    agentAudit,
+    '~/.claude/agents/ (remove gsd-*.md files)',
+    (f) => f.details,
+  );
+  printManualRemovalChecklist(
+    mcpAudit,
+    '.mcp.json (remove legacy GSD server entries)',
+    (f) => `${f.path}: server "${f.key}"`,
+  );
+  printManualRemovalChecklist(
+    settingsAudit,
+    '~/.claude/settings.json (remove legacy hook entries)',
+    (f) => `hooks.${f.event}: ${f.command}`,
+  );
+  printManualRemovalChecklist(
+    hookAudit,
+    '~/.claude/hooks/ (remove legacy hook scripts)',
+    (f) => f.path,
+  );
 
   if (npmAudit.found) {
     console.log('');
@@ -521,157 +437,19 @@ async function main() {
   console.log('');
 }
 
-// ─── Auto-migration (runs silently on session start) ────────────────────────
-
-/**
- * Automatically fix legacy artifacts without user interaction.
- * Safe to call on every session start — idempotent, non-destructive.
- *
- * What it does:
- *   - Moves ~/.claude/get-shit-done/ to ~/.claude/get-shit-done-legacy/
- *   - Moves ~/.claude/commands/gsd/ to ~/.claude/commands/gsd-legacy/
- *   - Removes GSD skill dirs (gsd-*) from ~/.claude/skills/
- *   - Removes GSD agent files (gsd-*.md) from ~/.claude/agents/
- *   - Removes GSD entries from project .mcp.json
- *   - Removes GSD hook entries from ~/.claude/settings.json
- *   - Removes legacy hook scripts from ~/.claude/hooks/
- *
- * What it does NOT do:
- *   - Uninstall npm packages (requires user action)
- *   - Delete any data (legacy root is moved, not deleted)
- *
- * @param {string} cwd - Project working directory (for .mcp.json)
- * @returns {{ migrated: boolean, actions: string[] }}
- */
-function autoMigrate(cwd) {
-  const actions = [];
-
-  try {
-    // 1. Move legacy root (not delete)
-    if (fs.existsSync(LEGACY_PATHS.gsdRoot)) {
-      const backupPath = LEGACY_PATHS.gsdRoot + '-legacy';
-      if (!fs.existsSync(backupPath)) {
-        fs.renameSync(LEGACY_PATHS.gsdRoot, backupPath);
-        actions.push(`Moved ~/.claude/get-shit-done/ to ~/.claude/get-shit-done-legacy/`);
-      } else {
-        // Backup exists, legacy root is leftover — remove it
-        fs.rmSync(LEGACY_PATHS.gsdRoot, { recursive: true, force: true });
-        actions.push(`Removed leftover ~/.claude/get-shit-done/ (backup already exists)`);
-      }
-    }
-
-    // 2. Move legacy commands directory
-    if (fs.existsSync(LEGACY_PATHS.gsdCommands)) {
-      const backupPath = LEGACY_PATHS.gsdCommands + '-legacy';
-      if (!fs.existsSync(backupPath)) {
-        fs.renameSync(LEGACY_PATHS.gsdCommands, backupPath);
-        actions.push(`Moved ~/.claude/commands/gsd/ to ~/.claude/commands/gsd-legacy/`);
-      } else {
-        fs.rmSync(LEGACY_PATHS.gsdCommands, { recursive: true, force: true });
-        actions.push(`Removed leftover ~/.claude/commands/gsd/ (backup already exists)`);
-      }
-    }
-
-    // 3. Remove legacy GSD skill directories from ~/.claude/skills/
-    if (fs.existsSync(LEGACY_PATHS.gsdSkills)) {
-      try {
-        const dirs = fs.readdirSync(LEGACY_PATHS.gsdSkills).filter(d => d.startsWith('gsd-'));
-        for (const dir of dirs) {
-          fs.rmSync(path.join(LEGACY_PATHS.gsdSkills, dir), { recursive: true, force: true });
-          actions.push(`Removed legacy skill dir ~/.claude/skills/${dir}`);
-        }
-      } catch { /* skip */ }
-    }
-
-    // 4. Remove legacy GSD agent files from ~/.claude/agents/
-    if (fs.existsSync(LEGACY_PATHS.agentsDir)) {
-      try {
-        const files = fs.readdirSync(LEGACY_PATHS.agentsDir).filter(f => f.startsWith('gsd-'));
-        for (const file of files) {
-          fs.unlinkSync(path.join(LEGACY_PATHS.agentsDir, file));
-          actions.push(`Removed legacy agent ~/.claude/agents/${file}`);
-        }
-      } catch { /* skip */ }
-    }
-
-    // 5. Clean legacy GSD entries from .mcp.json
-    const projectMcp = path.join(cwd, '.mcp.json');
-    if (fs.existsSync(projectMcp)) {
-      try {
-        const content = JSON.parse(fs.readFileSync(projectMcp, 'utf8'));
-        const servers = content.mcpServers || {};
-        let changed = false;
-
-        for (const [name, config] of Object.entries(servers)) {
-          const args = (config.args || []).join(' ');
-          const cmd = config.command || '';
-          if (`${cmd} ${args}`.includes('get-shit-done')) {
-            delete servers[name];
-            changed = true;
-            actions.push(`Removed legacy MCP entry "${name}" from .mcp.json`);
-          }
-        }
-
-        if (changed) {
-          content.mcpServers = servers;
-          fs.writeFileSync(projectMcp, JSON.stringify(content, null, 2) + '\n');
-        }
-      } catch { /* skip invalid JSON */ }
-    }
-
-    // 6. Clean GSD hooks from settings.json
-    if (fs.existsSync(LEGACY_PATHS.settingsJson)) {
-      try {
-        const content = JSON.parse(fs.readFileSync(LEGACY_PATHS.settingsJson, 'utf8'));
-        const hooks = content.hooks || {};
-        let changed = false;
-
-        for (const [event, groups] of Object.entries(hooks)) {
-          if (!Array.isArray(groups)) continue;
-          const filtered = groups.filter((group) => {
-            const cmds = extractHookCommands(group);
-            const hasLegacy = cmds.some(isLegacyGsdHookCommand);
-            if (hasLegacy) {
-              for (const cmd of cmds) {
-                if (isLegacyGsdHookCommand(cmd)) {
-                  actions.push(`Removed legacy hook "${event}" -> ${cmd}`);
-                }
-              }
-              changed = true;
-              return false;
-            }
-            return true;
-          });
-          hooks[event] = filtered;
-          if (filtered.length === 0) delete hooks[event];
-        }
-
-        if (changed) {
-          content.hooks = hooks;
-          if (Object.keys(content.hooks).length === 0) delete content.hooks;
-          fs.writeFileSync(LEGACY_PATHS.settingsJson, JSON.stringify(content, null, 2) + '\n');
-        }
-      } catch { /* skip invalid JSON */ }
-    }
-
-    // 7. Remove legacy hook scripts
-    for (const hookFile of LEGACY_PATHS.hookFiles) {
-      const fullPath = path.join(LEGACY_PATHS.hooksDir, hookFile);
-      if (fs.existsSync(fullPath)) {
-        fs.unlinkSync(fullPath);
-        actions.push(`Removed legacy hook script ${hookFile}`);
-      }
-    }
-  } catch (err) {
-    // Auto-migration should never break a session — swallow errors
-    actions.push(`Auto-migration error (non-fatal): ${err.message}`);
-  }
-
-  return { migrated: actions.length > 0, actions };
-}
-
-// Export for use by gsd-tools.cjs
-module.exports = { main, autoMigrate, auditLegacyRoot, auditMcpJson, auditSettingsJson, auditHookFiles, auditNpmPackage };
+module.exports = {
+  main,
+  auditLegacyRoot,
+  auditMcpJson,
+  auditSettingsJson,
+  auditGsdCommands,
+  auditGsdSkills,
+  auditGsdAgents,
+  auditHookFiles,
+  auditNpmPackage,
+  printHeader,
+  printFindings,
+};
 
 // Direct execution
 if (require.main === module) {

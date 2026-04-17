@@ -3,7 +3,11 @@
   "version": "1.35.0",
   "description": "Performance-optimized plugin packaging of GSD (Get Shit Done) for Claude Code",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "test": "node --test bin/lib/*.test.cjs mcp/*.test.cjs migrations/*.test.cjs",
     "validate:gsd-plugin": "node bin/validate-plugin.cjs .claude-plugin/plugin.json"
   },
   "keywords": [

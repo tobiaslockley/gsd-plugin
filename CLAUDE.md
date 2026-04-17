@@ -35,7 +35,16 @@ Use these entry points:
 Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
 <!-- GSD:workflow-end -->
 
+## Plugin boundaries
 
+The plugin MUST NOT write to any path outside the project's `.planning/` directory.
+This includes (but is not limited to):
+  - ~/.claude/settings.json
+  - ~/.claude/agents/, ~/.claude/skills/, ~/.claude/hooks/, ~/.claude/commands/
+  - Project-level .mcp.json (outside .planning/)
+
+For legacy artifacts that need removal, print a manual-removal checklist.
+Do not delete or rename user-owned config.
 
 <!-- GSD:profile-start -->
 ## Developer Profile
