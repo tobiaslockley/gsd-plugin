@@ -151,7 +151,7 @@ function cmdWorkstreamCreate(cwd, name, options, raw) {
 
   const statePath = path.join(wsDir, 'STATE.md');
   if (!fs.existsSync(statePath)) {
-    fs.writeFileSync(statePath, stateContent, 'utf-8');
+    atomicWriteFileSync(statePath, stateContent, 'utf-8');
   }
 
   setActiveWorkstream(cwd, slug);

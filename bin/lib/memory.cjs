@@ -19,6 +19,11 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Lazy import to keep the module lightweight when loaded in isolation.
+function _atomicWriteFileSync(...args) {
+  return require('./core.cjs').atomicWriteFileSync(...args);
+}
+
 // ─── Minimal helpers (avoid pulling in full core.cjs at import time) ────────
 
 /**
@@ -443,7 +448,7 @@ function updateMemoryIndex(memoryDir, filename, description) {
     }
   }
 
-  fs.writeFileSync(entrypointPath, content, 'utf-8');
+  _atomicWriteFileSync(entrypointPath, content, 'utf-8');
 }
 
 // ─── CLI command ────────────────────────────────────────────────────────────
@@ -476,7 +481,7 @@ function cmdWritePhaseMemory(cwd, phaseNumber, raw) {
 
   // Write memory file (stable filename = idempotent)
   const memoryFilePath = path.join(memoryDir, payload.filename);
-  fs.writeFileSync(memoryFilePath, payload.content, 'utf-8');
+  _atomicWriteFileSync(memoryFilePath, payload.content, 'utf-8');
 
   // Update MEMORY.md index
   updateMemoryIndex(memoryDir, payload.filename, payload.description);

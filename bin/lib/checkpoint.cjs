@@ -24,6 +24,7 @@ const {
   execGit,
   findPhaseInternal,
   output,
+  atomicWriteFileSync,
 } = require('./core.cjs');
 const { extractFrontmatter } = require('./frontmatter.cjs');
 
@@ -371,7 +372,7 @@ function writeCheckpoint(cwd, options = {}) {
       fs.mkdirSync(planningDirPath, { recursive: true });
     }
     const outPath = path.join(planningDirPath, 'HANDOFF.json');
-    fs.writeFileSync(outPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+    atomicWriteFileSync(outPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   } catch {
     // Flag partial but don't throw — PreCompact has a 5s budget and must not crash.
     data.partial = true;

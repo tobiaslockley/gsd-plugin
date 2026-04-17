@@ -4,7 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { safeReadFile, normalizeMd, output, error } = require('./core.cjs');
+const { safeReadFile, normalizeMd, output, error, atomicWriteFileSync } = require('./core.cjs');
 
 // ─── Parsing engine ───────────────────────────────────────────────────────────
 
@@ -42,11 +42,9 @@ function splitInlineArray(body) {
 
 function extractFrontmatter(content) {
   const frontmatter = {};
-  // Find ALL frontmatter blocks at the start of the file.
-  // If multiple blocks exist (corruption from CRLF mismatch), use the LAST one
-  // since it represents the most recent state sync.
-  const allBlocks = [...content.matchAll(/(?:^|\n)\s*---\r?\n([\s\S]+?)\r?\n---/g)];
-  const match = allBlocks.length > 0 ? allBlocks[allBlocks.length - 1] : null;
+  // Only match a frontmatter block at the very start of the file. Thematic
+  // breaks (---) in the body must not be mistaken for frontmatter.
+  const match = content.match(/^---\r?\n([\s\S]+?)\r?\n---/);
   if (!match) return frontmatter;
 
   const yaml = match[1];
@@ -337,7 +335,7 @@ function cmdFrontmatterSet(cwd, filePath, field, value, raw) {
   try { parsedValue = JSON.parse(value); } catch { parsedValue = value; }
   fm[field] = parsedValue;
   const newContent = spliceFrontmatter(content, fm);
-  fs.writeFileSync(fullPath, normalizeMd(newContent), 'utf-8');
+  atomicWriteFileSync(fullPath, normalizeMd(newContent), 'utf-8');
   output({ updated: true, field, value: parsedValue }, raw, 'true');
 }
 
@@ -351,7 +349,7 @@ function cmdFrontmatterMerge(cwd, filePath, data, raw) {
   try { mergeData = JSON.parse(data); } catch { error('Invalid JSON for --data'); return; }
   Object.assign(fm, mergeData);
   const newContent = spliceFrontmatter(content, fm);
-  fs.writeFileSync(fullPath, normalizeMd(newContent), 'utf-8');
+  atomicWriteFileSync(fullPath, normalizeMd(newContent), 'utf-8');
   output({ merged: true, fields: Object.keys(mergeData) }, raw, 'true');
 }
 

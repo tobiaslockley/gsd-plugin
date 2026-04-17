@@ -4,23 +4,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { escapeRegex, loadConfig, getMilestoneInfo, getMilestonePhaseFilter, normalizeMd, planningDir, planningPaths, output, error, atomicWriteFileSync } = require('./core.cjs');
+const { escapeRegex, loadConfig, getMilestoneInfo, getMilestonePhaseFilter, normalizeMd, planningDir, planningPaths, output, error, atomicWriteFileSync, withFileLock } = require('./core.cjs');
 const { extractFrontmatter, reconstructFrontmatter } = require('./frontmatter.cjs');
 
 /** Shorthand — every state command needs this path */
 function getStatePath(cwd) {
   return planningPaths(cwd).state;
 }
-
-// Track all lock files held by this process so they can be removed on exit.
-// process.on('exit') fires even on process.exit(1), unlike try/finally which is
-// skipped when error() calls process.exit(1) inside a locked region (#1916).
-const _heldStateLocks = new Set();
-process.on('exit', () => {
-  for (const lockPath of _heldStateLocks) {
-    try { require('fs').unlinkSync(lockPath); } catch { /* already gone */ }
-  }
-});
 
 // Shared helper: extract a field value from STATE.md content.
 // Supports both **Field:** bold and plain Field: format.
@@ -851,84 +841,42 @@ function syncStateFrontmatter(content, cwd) {
 }
 
 /**
- * Acquire a lockfile for STATE.md operations.
- * Returns the lock path for later release.
+ * Serialized STATE.md write that runs fn() under a file lock.
+ * Retries up to ~2s by default; an env override (GSD_LOCK_TIMEOUT_MS) controls
+ * the inter-retry delay for tests.
  */
-function acquireStateLock(statePath) {
-  const lockPath = statePath + '.lock';
-  const maxRetries = 10;
-  const retryDelay = 200; // ms
-
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
-      // Register for exit-time cleanup so process.exit(1) inside a locked region
-      // cannot leave a stale lock file (#1916).
-      _heldStateLocks.add(lockPath);
-      return lockPath;
-    } catch (err) {
-      if (err.code === 'EEXIST') {
-        try {
-          const stat = fs.statSync(lockPath);
-          if (Date.now() - stat.mtimeMs > 10000) {
-            fs.unlinkSync(lockPath);
-            continue;
-          }
-        } catch { /* lock was released between check — retry */ }
-
-        if (i === maxRetries - 1) {
-          try { fs.unlinkSync(lockPath); } catch {}
-          return lockPath;
-        }
-        const jitter = Math.floor(Math.random() * 50);
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelay + jitter);
-        continue;
-      }
-      return lockPath; // non-EEXIST error — proceed without lock
-    }
-  }
-  return statePath + '.lock';
-}
-
-function releaseStateLock(lockPath) {
-  _heldStateLocks.delete(lockPath);
-  try { fs.unlinkSync(lockPath); } catch { /* lock already gone */ }
+function withStateLock(statePath, fn) {
+  return withFileLock(
+    statePath + '.lock',
+    { timeoutMs: 2000, staleAfterMs: 10000 },
+    fn,
+  );
 }
 
 /**
  * Write STATE.md with synchronized YAML frontmatter.
- * All STATE.md writes should use this instead of raw writeFileSync.
- * Uses a simple lockfile to prevent parallel agents from overwriting
- * each other's changes (race condition with read-modify-write cycle).
+ * All STATE.md writes must go through this (not raw writeFileSync) so parallel
+ * agents cannot clobber each other's updates.
  */
 function writeStateMd(statePath, content, cwd) {
   const synced = syncStateFrontmatter(content, cwd);
-  const lockPath = acquireStateLock(statePath);
-  try {
+  withStateLock(statePath, () => {
     atomicWriteFileSync(statePath, normalizeMd(synced), 'utf-8');
-  } finally {
-    releaseStateLock(lockPath);
-  }
+  });
 }
 
 /**
- * Atomic read-modify-write for STATE.md.
- * Holds the lock across the entire read -> transform -> write cycle,
- * preventing the lost-update problem where two agents read the same
- * content and the second write clobbers the first.
+ * Atomic read-modify-write for STATE.md. Holds the lock across the entire
+ * read → transform → write cycle so a second agent's write cannot clobber
+ * the first agent's changes.
  */
 function readModifyWriteStateMd(statePath, transformFn, cwd) {
-  const lockPath = acquireStateLock(statePath);
-  try {
+  withStateLock(statePath, () => {
     const content = fs.existsSync(statePath) ? fs.readFileSync(statePath, 'utf-8') : '';
     const modified = transformFn(content);
     const synced = syncStateFrontmatter(modified, cwd);
     atomicWriteFileSync(statePath, normalizeMd(synced), 'utf-8');
-  } finally {
-    releaseStateLock(lockPath);
-  }
+  });
 }
 
 function cmdStateJson(cwd, raw) {
@@ -1089,7 +1037,7 @@ function cmdSignalWaiting(cwd, type, question, options, phase, raw) {
 
   try {
     fs.mkdirSync(gsdDir, { recursive: true });
-    fs.writeFileSync(waitingPath, JSON.stringify(signal, null, 2), 'utf-8');
+    atomicWriteFileSync(waitingPath, JSON.stringify(signal, null, 2), 'utf-8');
     output({ signaled: true, path: waitingPath }, raw, 'true');
   } catch (e) {
     output({ signaled: false, error: e.message }, raw, 'false');
@@ -1166,37 +1114,31 @@ function cmdStatePlannedPhase(cwd, phaseNumber, planCount, raw) {
     return;
   }
 
-  let content = fs.readFileSync(statePath, 'utf-8');
   const today = new Date().toISOString().split('T')[0];
   const updated = [];
 
-  // Update Status
-  let result = stateReplaceField(content, 'Status', 'Ready to execute');
-  if (result) { content = result; updated.push('Status'); }
+  readModifyWriteStateMd(statePath, (content) => {
+    let result = stateReplaceField(content, 'Status', 'Ready to execute');
+    if (result) { content = result; updated.push('Status'); }
 
-  // Update Total Plans in Phase
-  if (planCount !== null && planCount !== undefined) {
-    result = stateReplaceField(content, 'Total Plans in Phase', String(planCount));
-    if (result) { content = result; updated.push('Total Plans in Phase'); }
-  }
+    if (planCount !== null && planCount !== undefined) {
+      result = stateReplaceField(content, 'Total Plans in Phase', String(planCount));
+      if (result) { content = result; updated.push('Total Plans in Phase'); }
+    }
 
-  // Update Last Activity
-  result = stateReplaceField(content, 'Last Activity', today);
-  if (result) { content = result; updated.push('Last Activity'); }
+    result = stateReplaceField(content, 'Last Activity', today);
+    if (result) { content = result; updated.push('Last Activity'); }
 
-  // Update Last Activity Description
-  result = stateReplaceField(content, 'Last Activity Description', `Phase ${phaseNumber} planning complete — ${planCount || '?'} plans ready`);
-  if (result) { content = result; updated.push('Last Activity Description'); }
+    result = stateReplaceField(content, 'Last Activity Description', `Phase ${phaseNumber} planning complete — ${planCount || '?'} plans ready`);
+    if (result) { content = result; updated.push('Last Activity Description'); }
 
-  // Update Current Position section
-  content = updateCurrentPositionFields(content, {
-    status: 'Ready to execute',
-    lastActivity: `${today} -- Phase ${phaseNumber} planning complete`,
-  });
+    content = updateCurrentPositionFields(content, {
+      status: 'Ready to execute',
+      lastActivity: `${today} -- Phase ${phaseNumber} planning complete`,
+    });
 
-  if (updated.length > 0) {
-    writeStateMd(statePath, content, cwd);
-  }
+    return content;
+  }, cwd);
 
   output({ updated, phase: phaseNumber, plan_count: planCount }, raw, updated.length > 0 ? 'true' : 'false');
 }

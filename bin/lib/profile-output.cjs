@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { output, error, safeReadFile } = require('./core.cjs');
+const { output, error, safeReadFile, atomicWriteFileSync } = require('./core.cjs');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -628,7 +628,7 @@ function cmdWriteProfile(cwd, options, raw) {
   }
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, template, 'utf-8');
+  atomicWriteFileSync(outputPath, template, 'utf-8');
 
   const result = {
     profile_path: outputPath,
@@ -781,7 +781,7 @@ function cmdGenerateDevPreferences(cwd, options, raw) {
   }
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, template, 'utf-8');
+  atomicWriteFileSync(outputPath, template, 'utf-8');
 
   const result = {
     command_path: outputPath,
@@ -891,10 +891,10 @@ function cmdGenerateClaudeProfile(cwd, options, raw) {
       existingContent = existingContent.trimEnd() + '\n\n' + sectionContent + '\n';
       action = 'appended';
     }
-    fs.writeFileSync(targetPath, existingContent, 'utf-8');
+    atomicWriteFileSync(targetPath, existingContent, 'utf-8');
   } else {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.writeFileSync(targetPath, sectionContent + '\n', 'utf-8');
+    atomicWriteFileSync(targetPath, sectionContent + '\n', 'utf-8');
     action = 'created';
   }
 
@@ -965,7 +965,7 @@ function cmdGenerateClaudeMd(cwd, options, raw) {
     existingContent = sections.join('\n\n') + '\n';
     action = 'created';
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.writeFileSync(outputPath, existingContent, 'utf-8');
+    atomicWriteFileSync(outputPath, existingContent, 'utf-8');
   } else {
     action = 'updated';
     let fileContent = existingContent;
@@ -1001,7 +1001,7 @@ function cmdGenerateClaudeMd(cwd, options, raw) {
       fileContent = fileContent.trimEnd() + '\n\n' + CLAUDE_MD_PROFILE_PLACEHOLDER + '\n';
     }
 
-    fs.writeFileSync(outputPath, fileContent, 'utf-8');
+    atomicWriteFileSync(outputPath, fileContent, 'utf-8');
   }
 
   const finalContent = safeReadFile(outputPath);

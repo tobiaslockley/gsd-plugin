@@ -77,15 +77,86 @@ const WORKSTREAM_SESSION_ENV_KEYS = [
 let cachedControllingTtyToken = null;
 let didProbeControllingTtyToken = false;
 
-// Track all .planning/.lock files held by this process so they can be removed
-// on exit. process.on('exit') fires even on process.exit(1), unlike try/finally
-// which is skipped when error() calls process.exit(1) inside a locked region (#1916).
-const _heldPlanningLocks = new Set();
+// Track every O_EXCL lock file held by this process so an errant process.exit
+// inside a locked region cannot leave a stale lock behind (#1916). process.on('exit')
+// fires even for process.exit(1), unlike try/finally which is skipped when error()
+// tears down the process.
+const _heldLocks = new Set();
 process.on('exit', () => {
-  for (const lockPath of _heldPlanningLocks) {
+  for (const lockPath of _heldLocks) {
     try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
   }
 });
+
+/**
+ * Synchronous sleep. Used inside a file-lock retry loop where we cannot yield
+ * to the event loop (event-loop-based sleep would deadlock if the critical
+ * section runs on the main thread). Atomics.wait on a SharedArrayBuffer is the
+ * canonical Node primitive for blocking a single thread for N ms.
+ */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Acquire an exclusive file-based lock, run fn(), release, and clean up.
+ *
+ * Throws on timeout rather than force-unlinking an actively-held lock.
+ * Stale locks (older than staleAfterMs) are reclaimed automatically.
+ *
+ * @param {string} lockPath - the lock file to create
+ * @param {{ timeoutMs?: number, staleAfterMs?: number, retryDelayMs?: number, payload?: any }} opts
+ * @param {() => any} fn - critical section to run while the lock is held
+ */
+function withFileLock(lockPath, opts, fn) {
+  if (typeof opts === 'function') { fn = opts; opts = {}; }
+  const {
+    timeoutMs = 10000,
+    staleAfterMs = 10000,
+    retryDelayMs = parseInt(process.env.GSD_LOCK_TIMEOUT_MS, 10) || 100,
+    payload,
+  } = opts || {};
+
+  const start = Date.now();
+
+  while (true) {
+    try {
+      const fd = fs.openSync(
+        lockPath,
+        fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY
+      );
+      const body = payload !== undefined ? payload : String(process.pid);
+      fs.writeSync(fd, typeof body === 'string' ? body : JSON.stringify(body));
+      fs.closeSync(fd);
+      _heldLocks.add(lockPath);
+
+      try {
+        return fn();
+      } finally {
+        _heldLocks.delete(lockPath);
+        try { fs.unlinkSync(lockPath); } catch { /* already released */ }
+      }
+    } catch (err) {
+      if (err.code === 'EEXIST') {
+        try {
+          const stat = fs.statSync(lockPath);
+          if (Date.now() - stat.mtimeMs > staleAfterMs) {
+            try { fs.unlinkSync(lockPath); } catch { /* race: another holder reclaimed it */ }
+            continue;
+          }
+        } catch { /* lock released between stat and unlink — retry */ }
+
+        if (Date.now() - start >= timeoutMs) {
+          throw new Error(`Failed to acquire lock at ${lockPath} within ${timeoutMs}ms`);
+        }
+        const jitter = Math.floor(Math.random() * 50);
+        sleepSync(retryDelayMs + jitter);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
@@ -235,6 +306,43 @@ function reapStaleTempFiles(prefix = 'gsd-', { maxAgeMs = 5 * 60 * 1000, dirsOnl
   }
 }
 
+// ─── Output capture ──────────────────────────────────────────────────────────
+//
+// When the CLI runs, output()/error() write directly to fd 1/fd 2. When the
+// MCP server runs a cmd* fn, it wraps the call in `captureOutput()` to divert
+// those writes into an in-memory buffer instead. This replaces the older
+// process.stdout monkey-patching in mcp/server.cjs (captureCmd), which
+// missed stderr and required mutating process.argv. cmd* signatures stay
+// unchanged — capture is invisible to them.
+//
+// This is a pragmatic intermediate step toward the return-based CmdResult
+// design in the execution plan.
+
+let _captureBuffer = null;
+
+class _CapturedExit extends Error {
+  constructor(code) { super('__captured_exit__'); this.code = code || 0; }
+}
+
+function captureOutput(fn) {
+  const prior = _captureBuffer;
+  _captureBuffer = { stdout: [], stderr: [], exitCode: 0, exited: false };
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof _CapturedExit) {
+      _captureBuffer.exitCode = err.code;
+      _captureBuffer.exited = true;
+    } else {
+      _captureBuffer = prior;
+      throw err;
+    }
+  }
+  const out = _captureBuffer;
+  _captureBuffer = prior;
+  return out;
+}
+
 function output(result, raw, rawValue) {
   let data;
   if (raw && rawValue !== undefined) {
@@ -252,6 +360,10 @@ function output(result, raw, rawValue) {
       data = json;
     }
   }
+  if (_captureBuffer) {
+    _captureBuffer.stdout.push(data);
+    return;
+  }
   // process.stdout.write() is async when stdout is a pipe — process.exit()
   // can tear down the process before the reader consumes the buffer.
   // fs.writeSync(1, ...) blocks until the kernel accepts the bytes, and
@@ -260,6 +372,10 @@ function output(result, raw, rawValue) {
 }
 
 function error(message) {
+  if (_captureBuffer) {
+    _captureBuffer.stderr.push('Error: ' + message + '\n');
+    throw new _CapturedExit(1);
+  }
   fs.writeSync(2, 'Error: ' + message + '\n');
   process.exit(1);
 }
@@ -316,7 +432,7 @@ function loadConfig(cwd) {
       const depthToGranularity = { quick: 'coarse', standard: 'standard', comprehensive: 'fine' };
       parsed.granularity = depthToGranularity[parsed.depth] || parsed.depth;
       delete parsed.depth;
-      try { fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf-8'); } catch { /* intentionally empty */ }
+      try { atomicWriteFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf-8'); } catch { /* intentionally empty */ }
     }
 
     // Auto-detect and sync sub_repos: scan for child directories with .git
@@ -349,7 +465,7 @@ function loadConfig(cwd) {
 
     // Persist sub_repos changes (migration or sync)
     if (configDirty) {
-      try { fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf-8'); } catch {}
+      try { atomicWriteFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf-8'); } catch {}
     }
 
     // Warn about unrecognized top-level keys so users don't silently lose config.
@@ -648,55 +764,19 @@ function resolveWorktreeRoot(cwd) {
  * Lock is auto-released after the callback completes.
  */
 function withPlanningLock(cwd, fn) {
-  const lockPath = path.join(planningDir(cwd), '.lock');
-  const lockTimeout = 10000; // 10 seconds
-  const retryDelay = 100;
-  const start = Date.now();
+  const planningDirPath = planningDir(cwd);
+  try { fs.mkdirSync(planningDirPath, { recursive: true }); } catch { /* ok */ }
 
-  // Ensure .planning/ exists
-  try { fs.mkdirSync(planningDir(cwd), { recursive: true }); } catch { /* ok */ }
-
-  while (Date.now() - start < lockTimeout) {
-    try {
-      // Atomic create — fails if file exists
-      fs.writeFileSync(lockPath, JSON.stringify({
-        pid: process.pid,
-        cwd,
-        acquired: new Date().toISOString(),
-      }), { flag: 'wx' });
-
-      // Register for exit-time cleanup so process.exit(1) inside a locked region
-      // cannot leave a stale lock file (#1916).
-      _heldPlanningLocks.add(lockPath);
-
-      // Lock acquired — run the function
-      try {
-        return fn();
-      } finally {
-        _heldPlanningLocks.delete(lockPath);
-        try { fs.unlinkSync(lockPath); } catch { /* already released */ }
-      }
-    } catch (err) {
-      if (err.code === 'EEXIST') {
-        // Lock exists — check if stale (>30s old)
-        try {
-          const stat = fs.statSync(lockPath);
-          if (Date.now() - stat.mtimeMs > 30000) {
-            fs.unlinkSync(lockPath);
-            continue; // retry
-          }
-        } catch { continue; }
-
-        // Wait and retry (cross-platform, no shell dependency)
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-        continue;
-      }
-      throw err;
-    }
-  }
-  // Timeout — force acquire (stale lock recovery)
-  try { fs.unlinkSync(lockPath); } catch { /* ok */ }
-  return fn();
+  return withFileLock(
+    path.join(planningDirPath, '.lock'),
+    {
+      timeoutMs: 10000,
+      staleAfterMs: 30000,
+      retryDelayMs: 100,
+      payload: { pid: process.pid, cwd, acquired: new Date().toISOString() },
+    },
+    fn,
+  );
 }
 
 /**
@@ -938,7 +1018,7 @@ function setActiveWorkstream(cwd, name) {
   if (sessionScoped) {
     fs.mkdirSync(sessionScoped.dirPath, { recursive: true });
   }
-  fs.writeFileSync(filePath, name + '\n', 'utf-8');
+  atomicWriteFileSync(filePath, name + '\n', 'utf-8');
 }
 
 // ─── Phase utilities ──────────────────────────────────────────────────────────
@@ -1599,6 +1679,7 @@ function atomicWriteFileSync(filePath, content, encoding = 'utf-8') {
 module.exports = {
   output,
   error,
+  captureOutput,
   safeReadFile,
   loadConfig,
   isGitIgnored,
@@ -1625,6 +1706,8 @@ module.exports = {
   extractOneLinerFromBody,
   resolveWorktreeRoot,
   withPlanningLock,
+  withFileLock,
+  sleepSync,
   findProjectRoot,
   detectSubRepos,
   reapStaleTempFiles,

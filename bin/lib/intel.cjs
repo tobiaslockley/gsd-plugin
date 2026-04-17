@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { atomicWriteFileSync } = require('./core.cjs');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -363,7 +364,7 @@ function saveRefreshSnapshot(planningDir) {
 
   const timestamp = new Date().toISOString();
   const snapshotPath = path.join(intelPath, '.last-refresh.json');
-  fs.writeFileSync(snapshotPath, JSON.stringify({
+  atomicWriteFileSync(snapshotPath, JSON.stringify({
     hashes,
     timestamp,
     version: 1
@@ -503,7 +504,7 @@ function intelPatchMeta(filePath) {
     data._meta.updated_at = timestamp;
     data._meta.version = (data._meta.version || 0) + 1;
 
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    atomicWriteFileSync(filePath, JSON.stringify(data, null, 2) + '\n', 'utf8');
 
     return { patched: true, file: filePath, timestamp };
   } catch (e) {

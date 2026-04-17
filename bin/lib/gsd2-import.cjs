@@ -435,7 +435,7 @@ function writePlanningDir(artifacts, planningRoot) {
   for (const [rel, content] of artifacts) {
     const absPath = path.join(planningRoot, rel);
     fs.mkdirSync(path.dirname(absPath), { recursive: true });
-    fs.writeFileSync(absPath, content, 'utf8');
+    require('./core.cjs').atomicWriteFileSync(absPath, content, 'utf8');
   }
 }
 
