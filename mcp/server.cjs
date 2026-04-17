@@ -103,21 +103,15 @@ function captureCmd(fn, ...args) {
 let requestBuffer = '';
 
 function sendResponse(id, result) {
-  const msg = JSON.stringify({ jsonrpc: '2.0', id, result });
-  const header = `Content-Length: ${Buffer.byteLength(msg)}\r\n\r\n`;
-  process.stdout.write(header + msg);
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
 }
 
 function sendError(id, code, message) {
-  const msg = JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } });
-  const header = `Content-Length: ${Buffer.byteLength(msg)}\r\n\r\n`;
-  process.stdout.write(header + msg);
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n');
 }
 
 function sendNotification(method, params) {
-  const msg = JSON.stringify({ jsonrpc: '2.0', method, params });
-  const header = `Content-Length: ${Buffer.byteLength(msg)}\r\n\r\n`;
-  process.stdout.write(header + msg);
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
 }
 
 // ─── Resource handlers ──────────────────────────────────────────────────────
@@ -523,42 +517,36 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   requestBuffer += chunk;
 
-  // Process complete messages (Content-Length header + body)
   while (true) {
+    // LSP-style Content-Length framing (optional; accepted if headers present)
     const headerEnd = requestBuffer.indexOf('\r\n\r\n');
-    if (headerEnd === -1) break;
-
-    const header = requestBuffer.substring(0, headerEnd);
-    const contentLengthMatch = header.match(/Content-Length:\s*(\d+)/i);
-    if (!contentLengthMatch) {
-      // Try to parse as raw JSON (some transports skip headers)
-      try {
-        const newlineIdx = requestBuffer.indexOf('\n');
-        if (newlineIdx !== -1) {
-          const line = requestBuffer.substring(0, newlineIdx).trim();
-          if (line.startsWith('{')) {
-            const parsed = JSON.parse(line);
-            requestBuffer = requestBuffer.substring(newlineIdx + 1);
-            handleRequest(parsed);
-            continue;
-          }
+    if (headerEnd !== -1) {
+      const header = requestBuffer.substring(0, headerEnd);
+      const contentLengthMatch = header.match(/Content-Length:\s*(\d+)/i);
+      if (contentLengthMatch) {
+        const contentLength = parseInt(contentLengthMatch[1], 10);
+        const bodyStart = headerEnd + 4;
+        const totalLength = bodyStart + contentLength;
+        if (requestBuffer.length < totalLength) break;
+        const body = requestBuffer.substring(bodyStart, totalLength);
+        requestBuffer = requestBuffer.substring(totalLength);
+        try {
+          handleRequest(JSON.parse(body));
+        } catch (err) {
+          process.stderr.write(`GSD MCP: Failed to parse request: ${err.message}\n`);
         }
-      } catch {}
-      break;
+        continue;
+      }
     }
 
-    const contentLength = parseInt(contentLengthMatch[1]);
-    const bodyStart = headerEnd + 4;
-    const totalLength = bodyStart + contentLength;
-
-    if (requestBuffer.length < totalLength) break;
-
-    const body = requestBuffer.substring(bodyStart, totalLength);
-    requestBuffer = requestBuffer.substring(totalLength);
-
+    // Newline-delimited JSON (MCP stdio spec)
+    const newlineIdx = requestBuffer.indexOf('\n');
+    if (newlineIdx === -1) break;
+    const line = requestBuffer.substring(0, newlineIdx).trim();
+    requestBuffer = requestBuffer.substring(newlineIdx + 1);
+    if (!line) continue;
     try {
-      const parsed = JSON.parse(body);
-      handleRequest(parsed);
+      handleRequest(JSON.parse(line));
     } catch (err) {
       process.stderr.write(`GSD MCP: Failed to parse request: ${err.message}\n`);
     }
