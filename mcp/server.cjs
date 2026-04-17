@@ -26,7 +26,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 // Resolve GSD bin/lib from plugin root (server lives at <root>/mcp/server.cjs)
 const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
@@ -51,51 +51,48 @@ try {
 function safeRead(filePath) {
   try {
     return fs.readFileSync(filePath, 'utf8');
-  } catch {
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') {
+      process.stderr.write(`GSD MCP: read failed for ${filePath}: ${err.code}\n`);
+    }
     return null;
   }
 }
 
 function findPlanningDir() {
-  // Use CWD (the project root) to find .planning/
-  const cwd = process.cwd();
-  const planningDir = path.join(cwd, '.planning');
-  if (fs.existsSync(planningDir)) return planningDir;
-  return null;
+  if (!core || !core.findProjectRoot || !core.planningDir) {
+    const fallback = path.join(process.cwd(), '.planning');
+    return fs.existsSync(fallback) ? fallback : null;
+  }
+  const root = core.findProjectRoot(process.cwd());
+  const dir = core.planningDir(root);
+  return fs.existsSync(dir) ? dir : null;
 }
 
 /**
- * Capture output from a GSD command function that writes to stdout/exits.
- * Intercepts process.stdout.write and process.exit to capture the result safely.
+ * Run a library cmd* function and return its stdout/stderr/exitCode. Delegates
+ * to core.captureOutput so the cmd* fns don't need to know they're being
+ * captured. Replaces the old process.stdout monkey-patch approach.
  */
-function captureCmd(fn, ...args) {
-  const chunks = [];
-  const origWrite = process.stdout.write;
-  const origExit = process.exit;
-  let exitCode = 0;
-
-  process.stdout.write = function (chunk) {
-    chunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
-    return true;
-  };
-
-  process.exit = function (code) {
-    exitCode = code || 0;
-    throw new Error(`__GSD_EXIT_${exitCode}__`);
-  };
-
-  try {
-    fn(...args);
-  } catch (err) {
-    if (!err.message || !err.message.startsWith('__GSD_EXIT_')) {
-      throw err;
-    }
-  } finally {
-    process.stdout.write = origWrite;
-    process.exit = origExit;
+function runCmd(fn, ...args) {
+  if (!core || !core.captureOutput) {
+    return { stdout: '', stderr: 'core.captureOutput unavailable', exitCode: 1 };
   }
+  const captured = core.captureOutput(() => fn(...args));
+  return {
+    stdout: captured.stdout.join(''),
+    stderr: captured.stderr.join(''),
+    exitCode: captured.exitCode || 0,
+  };
+}
 
-  return { output: chunks.join(''), exitCode };
+function toolResult(captured, fallbackText) {
+  const content = [];
+  const text = captured.stdout || fallbackText || '';
+  if (text) content.push({ type: 'text', text });
+  if (captured.stderr) content.push({ type: 'text', text: captured.stderr });
+  const isError = captured.exitCode ? true : undefined;
+  return isError ? { content, isError } : { content };
 }
 
 // ─── Simple stdio JSON-RPC transport ────────────────────────────────────────
@@ -110,10 +107,6 @@ function sendError(id, code, message) {
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n');
 }
 
-function sendNotification(method, params) {
-  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
-}
-
 // ─── Resource handlers ──────────────────────────────────────────────────────
 
 const resourceHandlers = {
@@ -122,16 +115,11 @@ const resourceHandlers = {
     if (!planningDir) return { error: 'No .planning/ directory found' };
     const content = safeRead(path.join(planningDir, 'STATE.md'));
     if (!content) return { error: 'STATE.md not found' };
-    // Parse frontmatter for structured data
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-    if (fmMatch) {
-      const lines = fmMatch[1].split('\n');
-      const obj = {};
-      for (const line of lines) {
-        const m = line.match(/^(\w[\w_]*)\s*:\s*(.+)$/);
-        if (m) obj[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    if (frontmatter && frontmatter.extractFrontmatter) {
+      const fm = frontmatter.extractFrontmatter(content);
+      if (fm && Object.keys(fm).length > 0) {
+        return { contents: [{ uri: 'gsd://state', mimeType: 'application/json', text: JSON.stringify(fm, null, 2) }] };
       }
-      return { contents: [{ uri: 'gsd://state', mimeType: 'application/json', text: JSON.stringify(obj, null, 2) }] };
     }
     return { contents: [{ uri: 'gsd://state', mimeType: 'text/markdown', text: content }] };
   },
@@ -218,6 +206,25 @@ function handlePhaseContextResource(phaseNum) {
   };
 }
 
+function validateToolArgs(toolDef, args) {
+  const schema = toolDef.inputSchema || {};
+  const required = schema.required || [];
+  for (const field of required) {
+    if (args[field] === undefined || args[field] === null || args[field] === '') {
+      return { ok: false, error: `Missing required parameter: ${field}` };
+    }
+  }
+  const props = schema.properties || {};
+  for (const [k, v] of Object.entries(args)) {
+    const spec = props[k];
+    if (!spec) continue;
+    if (spec.type === 'string' && typeof v !== 'string') return { ok: false, error: `${k} must be string` };
+    if (spec.type === 'number' && typeof v !== 'number') return { ok: false, error: `${k} must be number` };
+    if (spec.type === 'array' && !Array.isArray(v)) return { ok: false, error: `${k} must be array` };
+  }
+  return { ok: true };
+}
+
 // ─── Tool handlers ──────────────────────────────────────────────────────────
 
 const toolDefinitions = [
@@ -293,7 +300,7 @@ const toolDefinitions = [
   },
   {
     name: 'gsd_commit_docs',
-    description: 'Commit planning documentation files',
+    description: 'Commit planning documentation files to git. Rejects if config `commit_docs` is false and any staged file is under .planning/.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -317,104 +324,97 @@ function handleToolCall(name, args) {
       }
 
       case 'gsd_advance_plan': {
-        if (state && state.cmdAdvancePlan) {
-          const result = captureCmd(state.cmdAdvancePlan);
-          return { content: [{ type: 'text', text: result.output || 'Plan advanced' }] };
+        if (!state || !state.cmdStateAdvancePlan) {
+          return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
         }
-        return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
+        const captured = runCmd(state.cmdStateAdvancePlan, process.cwd(), false);
+        return toolResult(captured, 'Plan advanced');
       }
 
       case 'gsd_record_metric': {
-        if (state && state.cmdRecordMetric) {
-          const fakeArgv = ['node', 'gsd-tools.cjs', 'state', 'record-metric',
-            '--phase', args.phase || '', '--plan', args.plan || '',
-            '--duration', args.duration || ''];
-          if (args.tasks) fakeArgv.push('--tasks', String(args.tasks));
-          if (args.files) fakeArgv.push('--files', String(args.files));
-          const origArgv = process.argv;
-          process.argv = fakeArgv;
-          try {
-            const result = captureCmd(state.cmdRecordMetric);
-            return { content: [{ type: 'text', text: result.output || 'Metric recorded' }] };
-          } finally {
-            process.argv = origArgv;
-          }
+        if (!state || !state.cmdStateRecordMetric) {
+          return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
         }
-        return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
+        const captured = runCmd(state.cmdStateRecordMetric, process.cwd(), {
+          phase: args.phase,
+          plan: args.plan,
+          duration: args.duration,
+          tasks: args.tasks,
+          files: args.files,
+        }, false);
+        return toolResult(captured, 'Metric recorded');
       }
 
       case 'gsd_add_decision': {
-        if (state && state.cmdAddDecision) {
-          const fakeArgv = ['node', 'gsd-tools.cjs', 'state', 'add-decision',
-            '--summary', args.summary || ''];
-          if (args.phase) fakeArgv.push('--phase', args.phase);
-          const origArgv = process.argv;
-          process.argv = fakeArgv;
-          try {
-            const result = captureCmd(state.cmdAddDecision);
-            return { content: [{ type: 'text', text: result.output || 'Decision added' }] };
-          } finally {
-            process.argv = origArgv;
-          }
+        if (!state || !state.cmdStateAddDecision) {
+          return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
         }
-        return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
+        const captured = runCmd(state.cmdStateAddDecision, process.cwd(), {
+          phase: args.phase,
+          summary: args.summary,
+        }, false);
+        return toolResult(captured, 'Decision added');
       }
 
       case 'gsd_add_blocker': {
-        if (state && state.cmdAddBlocker) {
-          const fakeArgv = ['node', 'gsd-tools.cjs', 'state', 'add-blocker',
-            '--text', args.text || ''];
-          const origArgv = process.argv;
-          process.argv = fakeArgv;
-          try {
-            const result = captureCmd(state.cmdAddBlocker);
-            return { content: [{ type: 'text', text: result.output || 'Blocker added' }] };
-          } finally {
-            process.argv = origArgv;
-          }
+        if (!state || !state.cmdStateAddBlocker) {
+          return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
         }
-        return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
+        const captured = runCmd(state.cmdStateAddBlocker, process.cwd(), args.text, false);
+        return toolResult(captured, 'Blocker added');
       }
 
       case 'gsd_resolve_blocker': {
-        if (state && state.cmdResolveBlocker) {
-          const fakeArgv = ['node', 'gsd-tools.cjs', 'state', 'resolve-blocker',
-            '--text', args.text || ''];
-          const origArgv = process.argv;
-          process.argv = fakeArgv;
-          try {
-            const result = captureCmd(state.cmdResolveBlocker);
-            return { content: [{ type: 'text', text: result.output || 'Blocker resolved' }] };
-          } finally {
-            process.argv = origArgv;
-          }
+        if (!state || !state.cmdStateResolveBlocker) {
+          return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
         }
-        return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
+        const captured = runCmd(state.cmdStateResolveBlocker, process.cwd(), args.text, false);
+        return toolResult(captured, 'Blocker resolved');
       }
 
       case 'gsd_record_session': {
-        if (state && state.cmdRecordSession) {
-          const fakeArgv = ['node', 'gsd-tools.cjs', 'state', 'record-session',
-            '--stopped-at', args.stopped_at || ''];
-          const origArgv = process.argv;
-          process.argv = fakeArgv;
-          try {
-            const result = captureCmd(state.cmdRecordSession);
-            return { content: [{ type: 'text', text: result.output || 'Session recorded' }] };
-          } finally {
-            process.argv = origArgv;
-          }
+        if (!state || !state.cmdStateRecordSession) {
+          return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
         }
-        return { content: [{ type: 'text', text: 'state module not available' }], isError: true };
+        const captured = runCmd(state.cmdStateRecordSession, process.cwd(), {
+          stopped_at: args.stopped_at,
+        }, false);
+        return toolResult(captured, 'Session recorded');
       }
 
       case 'gsd_commit_docs': {
+        if (!Array.isArray(args.files) || args.files.some(f => typeof f !== 'string')) {
+          return { content: [{ type: 'text', text: 'files must be an array of strings' }], isError: true };
+        }
+        if (typeof args.message !== 'string' || !args.message.trim()) {
+          return { content: [{ type: 'text', text: 'message must be a non-empty string' }], isError: true };
+        }
+
+        // Honour config.commit_docs=false — refuse any .planning/ file.
         try {
-          const files = args.files || [];
-          if (files.length > 0) {
-            execSync(`git add ${files.map(f => `"${f}"`).join(' ')}`, { stdio: 'pipe' });
+          const cwd = process.cwd();
+          const config = core && core.loadConfig ? core.loadConfig(cwd) : {};
+          if (config.commit_docs === false) {
+            const planningFiles = args.files.filter(
+              f => f.startsWith('.planning/') || f.startsWith('.planning\\')
+            );
+            if (planningFiles.length > 0) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `commit_docs is false; refusing to commit ${planningFiles.length} .planning/ file(s)`,
+                }],
+                isError: true,
+              };
+            }
           }
-          execSync(`git commit -m "${(args.message || 'docs: update').replace(/"/g, '\\"')}"`, { stdio: 'pipe' });
+        } catch { /* config unreadable — fall through to commit attempt */ }
+
+        try {
+          if (args.files.length > 0) {
+            execFileSync('git', ['add', '--', ...args.files], { stdio: 'pipe' });
+          }
+          execFileSync('git', ['commit', '-m', args.message], { stdio: 'pipe' });
           return { content: [{ type: 'text', text: `Committed: ${args.message}` }] };
         } catch (err) {
           return { content: [{ type: 'text', text: `Commit failed: ${err.message}` }], isError: true };
@@ -431,10 +431,17 @@ function handleToolCall(name, args) {
 
 // ─── MCP Protocol Handler ───────────────────────────────────────────────────
 
-const SERVER_INFO = {
-  name: 'gsd',
-  version: '1.32.0'
-};
+let SERVER_INFO;
+try {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')
+  );
+  SERVER_INFO = { name: manifest.name || 'gsd', version: manifest.version || '0.0.0' };
+} catch {
+  SERVER_INFO = { name: 'gsd', version: '0.0.0' };
+}
+
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2024-11-05'];
 
 const CAPABILITIES = {
   resources: { listChanged: false },
@@ -445,12 +452,20 @@ function handleRequest(request) {
   const { id, method, params } = request;
 
   switch (method) {
-    case 'initialize':
+    case 'initialize': {
+      const requested = params && params.protocolVersion;
+      const chosen = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+        ? requested
+        : '2024-11-05';
       return sendResponse(id, {
-        protocolVersion: '2024-11-05',
+        protocolVersion: chosen,
         serverInfo: SERVER_INFO,
         capabilities: CAPABILITIES
       });
+    }
+
+    case 'ping':
+      return sendResponse(id, {});
 
     case 'notifications/initialized':
       // Client acknowledgement, no response needed
@@ -498,10 +513,22 @@ function handleRequest(request) {
     case 'tools/list':
       return sendResponse(id, { tools: toolDefinitions });
 
+    case 'resources/templates/list':
+      return sendResponse(id, {
+        resourceTemplates: [
+          { uriTemplate: 'gsd://phase/{N}', name: 'GSD Phase Summary', mimeType: 'application/json' },
+          { uriTemplate: 'gsd://phase/{N}/context', name: 'GSD Phase Context', mimeType: 'text/markdown' },
+        ],
+      });
+
     case 'tools/call': {
       const toolName = params && params.name;
-      const toolArgs = params && params.arguments || {};
+      const toolArgs = (params && params.arguments) || {};
       if (!toolName) return sendError(id, -32602, 'Missing tool name');
+      const def = toolDefinitions.find(t => t.name === toolName);
+      if (!def) return sendError(id, -32601, `Unknown tool: ${toolName}`);
+      const check = validateToolArgs(def, toolArgs);
+      if (!check.ok) return sendError(id, -32602, check.error);
       const result = handleToolCall(toolName, toolArgs);
       return sendResponse(id, result);
     }
